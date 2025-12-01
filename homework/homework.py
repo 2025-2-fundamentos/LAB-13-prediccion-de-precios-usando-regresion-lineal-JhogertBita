@@ -1,3 +1,19 @@
+import os
+import gzip
+import json
+import pickle
+import zipfile
+import pandas as pd
+from sklearn.svm import SVC
+from sklearn.decomposition import PCA
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler, StandardScaler
+from sklearn.feature_selection import SelectKBest, f_classif
+#*from sklearn.neural_network import MLPClassifier
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, r2_score, median_absolute_error
 #
 # En este dataset se desea pronosticar el precio de vhiculos usados. El dataset
 # original contiene las siguientes columnas:
@@ -61,3 +77,119 @@
 # {'type': 'metrics', 'dataset': 'train', 'r2': 0.8, 'mse': 0.7, 'mad': 0.9}
 # {'type': 'metrics', 'dataset': 'test', 'r2': 0.7, 'mse': 0.6, 'mad': 0.8}
 #
+# Paso 1: Limpieza de los datos
+def clean_data(df):
+    df = df.copy()                                                      #? Se crea una copia del DataFrame para evitar modificar el original
+    df = df.dropna()                                                    #? Elimina las filas con valores nulos
+    df['Age'] = 2021 - df['Year']
+    df = df.drop(columns=['Year', 'Car_Name'])
+    
+    return df
+
+# Paso 3: Crear el pipeline del modelo
+def model():
+    categorical_columns = ["Fuel_Type", "Selling_type", "Transmission"]              #? Columnas categóricas
+    numeric_columns = ["Selling_Price", "Driven_kms", "Age", "Owner"]                #? Columnas numéricas
+
+    preprocessor = ColumnTransformer(                                                     #? Transformación de columnas categóricas y numéricas
+                    transformers = [
+                    ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_columns), #? OneHotEncoding para las columnas categóricas
+                    ('scaler', MinMaxScaler(), numeric_columns)                         #? Estandarización de las variables numéricas
+                    ],
+                    remainder ='passthrough'                                              #? Las columnas restantes se mantienen sin cambios
+                    )
+    selectkbest  = SelectKBest(score_func = f_classif)                           #? Selección de las K mejores característica
+    pipeline = Pipeline(steps = [                                             #? Modelo de clasificador (SVM)
+                        ('preprocessor', preprocessor),                       #? Primero, se aplica la preprocesamiento
+                        ("selectkbest", selectkbest ),                           #? Selección de las K mejores característica
+                        ('classifier', LinearRegression())
+                                ]
+                        )
+
+    return pipeline                                                           #? Devuelve el pipeline completo
+
+
+def optimize_hyperparameters(model, n_splits, x_train, y_train, scoring):     #? Paso 4: Optimización de hiperparámetros
+    estimator = GridSearchCV(
+        estimator = model,
+        param_grid = {
+            'selectkbest__k': range(1, 13),                                           #? Selección de las mejores 20 características
+        },
+        cv = n_splits,                                                          #? Validación cruzada con 10 splits
+        refit = True,
+        #*verbose=0,                                                            #? No mostrar detalles adicionales del proceso
+        scoring = scoring,                                                      #? Métrica de precisión balanceada
+        #*return_train_score = False                                            #? No devolver las métricas de entrenamiento
+    )
+    estimator.fit(x_train, y_train)                                           #? Ajusta el modelo con los datos de entrenamiento
+
+    return estimator
+
+def metrics(model, x_train, y_train, x_test, y_test):
+    y_train_pred = model.predict(x_train)
+    y_test_pred = model.predict(x_test)
+
+    train_metrics = {
+        'type': 'metrics',
+        'dataset': 'train',
+        'r2': r2_score(y_train, y_train_pred),
+        'mse': mean_squared_error(y_train, y_train_pred),
+        'mad': median_absolute_error(y_train, y_train_pred)
+    }
+
+    test_metrics = {
+        'type': 'metrics',
+        'dataset': 'test',
+        'r2': r2_score(y_test, y_test_pred),
+        'mse': mean_squared_error(y_test, y_test_pred),
+        'mad': median_absolute_error(y_test, y_test_pred)
+    }
+
+    return train_metrics, test_metrics
+
+def save_model(model):                                      #? Paso 5: Guardar el modelo
+    os.makedirs('files/models', exist_ok = True)
+
+    with gzip.open('files/models/model.pkl.gz', 'wb') as f:
+        pickle.dump(model, f)
+
+def save_metrics(metrics):
+    os.makedirs('files/output', exist_ok = True)
+
+    with open("files/output/metrics.json", "w") as f:
+        for metric in metrics:
+            json_line = json.dumps(metric)
+            f.write(json_line + "\n")
+
+
+
+file_Test = 'files/input/test_data.csv.zip'     #? Limpia los datos de prueba
+file_Train = 'files/input/train_data.csv.zip'   #? Limpia los datos de entrenamient
+
+
+with zipfile.ZipFile(file_Test, 'r') as zip:
+    with zip.open("test_data.csv") as f:
+        df_Test = pd.read_csv(f)
+
+
+with zipfile.ZipFile(file_Train, 'r') as zip:
+    with zip.open('train_data.csv') as f:
+        df_Train = pd.read_csv(f)
+
+
+df_Test = clean_data(df_Test)
+df_Train = clean_data(df_Train)
+
+
+x_train, y_train = df_Train.drop('Present_Price', axis = 1), df_Train['Present_Price']
+x_test, y_test = df_Test.drop('Present_Price', axis = 1), df_Test['Present_Price']
+
+model_pipeline = model()                                                                                 #? Crea el pipeline
+model_pipeline = optimize_hyperparameters(model_pipeline, 10, x_train, y_train, 'neg_mean_absolute_error')    #? Optimiza los hiperparámetros
+
+
+save_model(model_pipeline)
+
+train_metrics, test_metrics = metrics(model_pipeline, x_train, y_train, x_test, y_test)                  #? Calcular y guardar las métricas
+
+save_metrics([train_metrics, test_metrics])                                   #? Guardar las métricas y matrices de confusión
